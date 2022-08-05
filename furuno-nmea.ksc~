@@ -1,0 +1,287 @@
+#!/usr/local/bin/kermit + 
+
+#
+#  This is a Kermit script that monitors the depth, temperature, and 
+#  GPS readings from the Furuno unit on the Neeskay and records this dataset
+#  to a CSV file and also saves it to a MySQL database.
+#
+#  This script will end up being incorporated into the generalized GLUCOS
+#  software system, but for now it is a standalone program.
+#
+set tcp reverse off
+set input echo off
+
+# make connection
+
+# there are several alternatives that are available for testing and deployment.
+
+# Read from file, output in realistic time
+# set host /pty "./datagen.pl cruise-2006-0921-gps.txt"
+
+# Read from file as fast as possible
+# set host /pty "cat sample.txt"
+
+# connect to Moxa in TCP server mode
+set telnet wait off
+set host /nowait 192.168.148.25 4001
+
+# connect to Moxa in Real COM mode
+#set port /dev/ttyr02
+#set speed 19200
+#set carr off
+#set flow none
+lcd /opt/neeskay/bin
+
+# catch-all error check regardless of connect method
+if fail {
+	writeln error "unable to connect to 192.168.148.25"
+	! echo "ERROR 100: As of: `date`" > error.flag
+	! echo "Unable to connect to Furuno<br>" >> error.flag
+	! echo Check MOXA power on bridge >> error.flag
+	! beep -f 440 -r 4
+	exit 1
+}
+
+# from here on the script is the same no matter where the data is coming from.
+
+
+# define function to convert latitude and longitude from
+# the NMEA format to decimal degrees
+
+def NMEAtoDecCoords {
+
+	# assign arguments to friendly names
+	# (note that since N,S,E,W are all unique it is not necessary to
+	#  specify latitude vs longitude with this function.)
+	assign rawcoord \%1
+	assign rawdir \%2
+
+	if not equal x\%1 x {
+	if not equal x\%2 x {
+
+	# fancy S-expressions are the easiest way to do math in Kermit
+	(setq deccoord (truncate (/ rawcoord 100)))
+	(setq deccoord (+ deccoord (/ (- rawcoord (* deccoord 100)) 60)))
+	if equal {\m(rawdir)} {S} {
+		(setq deccoord (- deccoord))
+	}
+	if equal {\m(rawdir)} {W} {
+		(setq deccoord (- deccoord))
+	}
+	}
+	}
+	return \m(deccoord)
+}
+
+
+assign GPSdepth { }
+assign GPSlng { }
+assign GPSdepth { }
+assign GPStempc { }
+assign GPSFixQuality { }
+assign GPSnSats { }
+assign GPSHDOP { }
+assign GPSAlt { }
+assign GPSTTMG { }
+assign GPSMTMG { }
+assign GPSSOGN { }
+assign GPSSOGK { }
+assign GPSMagVar { }
+
+# !stty -F /dev/ttyS3 speed 19200 -crtscts
+
+# endless loop to read data
+while = 1 1 {
+
+	# wait for all NMEA sentences that we can parse so far
+	input 30 "$"
+	if error goto errmsg
+	clear input
+	input 2 ","
+	assign \%s \v(input)
+	clear input
+	input 2 \13
+	assign \%l \v(input)
+
+
+	# minput 30 "$GPDPT," "$GPGLL," "$GPMTW," "$GPZDA," "$GPGGA" "$GPVTG" "$GPRMC"
+
+	# we are receiving data, remove the error flag
+	! rm -f error.flag
+
+	assign \%l \fsubstr(\%l,1,\fsexp((- \flen(\%l) 1)))
+	assign \%s \fsubstr(\%s,1,\fsexp((- \flen(\%s) 1)))
+	assign \%c {,}
+	assign \%p \fchar(39)
+	assign \%q \fchar(34)
+	writeln error mysql...
+	# log raw GPS data to mySQL table
+	echo mysql -u shipuser -parrrrr -e \fchar(34)insert into raw_nmea (recdate, nmea) values(now()\%c\%p\\$\%s\%c\%l\%p)\%q neeskay
+	! mysql -u shipuser -parrrrr -e \fchar(34)insert into raw_nmea (recdate, nmea) values(now()\%c\%p\\$\%s\%c\%l\%p)\%q neeskay
+
+	# split the line into array &g on commas
+	assign \%d \fsplit(\%l,&g,{,})
+
+	writeln error line={$\%s,\%l}
+
+	switch \%s {
+
+		:"",	# included for completeness- should never be reached
+			writeln error "no data received"
+			break
+
+		:GPDPT,	# $GPDPT - depth
+
+			writeln error "$GPDPT," \%l
+			assign GPSdepth \&g[1]
+			break
+
+		:GPGLL,	# $GPGLL - GPS location
+
+			writeln error "$GPGLL," \%l
+			assign rawlatn \&g[1] # \fword(\%l,1,{,})
+			assign rawlatd \&g[2] # \fword(\%l,2,{,})
+			assign rawlngn \&g[3] # \fword(\%l,3,{,})
+			assign rawlngd \&g[4] # \fword(\%l,4,{,})
+			assign rawutc  \&g[5] # \fword(\%l,5,{,})
+
+			do NMEAtoDecCoords \m(rawlatn) \m(rawlatd)
+			assign gpslat \v(return)
+
+			do NMEAtoDecCoords \m(rawlngn) \m(rawlngd)
+			assign gpslng \v(return)
+
+			# echo lat=\m(gpslat)
+			# echo lng=\m(gpslng)
+
+			break
+
+		:GPMTW,	# $GPMTW - water temperature
+
+			writeln error "$GPMTW," \%l
+
+			assign temp \&g[1] # \fword(\%l,1,{,})
+			assign unit \&g[2] # \fword(\%l,2,{,})
+			# echo unit=\m(unit)
+			if equal {\fsubstr(\m(unit),1,1)} {F} {
+				(setq GPStempc (/ (* (- temp 32) 5) 9))
+			} else {
+				(setq GPStempc temp)
+			}
+			# echo temperature=\m(GPStempc) C
+
+			break
+
+		:GPZDA,	# $GPZDA  Date & Time
+			#
+			#  SPECIAL NOTE ON THE $GPZDA RECORD:
+			#
+			#  This sentence is always the last sentence received from
+			#  the Furuno in each burst of sentences that is issued once a second.
+			#  Therefore, reception of this sentence is used to trigger the
+			#  output of the data record, which simply consists of the most recently
+			#  received values of all supported data.
+			#
+
+			writeln error ">>>$GPZDA," \%l
+
+			# get data from YSI sonde
+
+			assign \%x {}   # YSI fields
+			assign \%z {}   # YSI data
+
+			# is there any YSI data?
+			if exist ../data/ysi-nmea.csv {
+				# yes -- invoke ysi-nmea.php to generate list of fields and data
+				! ./ysi-nmea.php ../data/ysi.csv
+				# now read them
+				open read ../data/ysi-nmea-data.csv
+				read \%x 
+				read \%z
+				close read
+			}
+
+			assign UTC      \&g[1] # \fword(\%l,1,{,})
+			assign GPSday   \&g[2] # \fword(\%l,2,{,})
+			assign GPSmonth \&g[3] # \fword(\%l,3,{,})
+			assign GPSyear  \&g[4] # \fword(\%l,4,{,})
+
+			assign kdate {\m(GPSyear)-\m(GPSmonth)-\m(GPSday)}
+			writeln error "Date: " \m(kdate)
+			assign kdatenum \fmjgd(\m(kdate))
+			writeln error "kdatenum=" \m(kdatenum)
+			assign kfixdate \fmjd2date(\m(kdatenum)+7168)
+			assign GPSyear \fsubstr(\m(kfixdate),1,4)
+			assign GPSmonth \fsubstr(\m(kfixdate),5,2)
+			assign GPSday \fsubstr(\m(kfixdate),7,2)
+
+			assign GPStime {\fsubstr(\m(UTC),1,2):\fsubstr(\m(UTC),3,2):\fsubstr(\m(UTC),5,2)}
+			writeln error "Fixed date: " \m(kfixdate)
+
+			# write to file upon receiving date/time
+			open append ../data/shipdata.csv
+			write file {\m(GPSyear)-\m(GPSmonth)-\m(GPSday) \m(GPStime),\m(GPSlat),\m(GPSlng),\m(GPSdepth),\m(GPStempc),\m(GPSFixQuality),\m(GPSnSats),\m(GPSHDOP),\m(GPSAlt),\m(GPSTTMG),\m(GPSMTMG),\m(GPSSOGN),\m(GPSSOGK),\m(GPSMagVar)\%z\10}
+			close append
+
+			# write to file upon receiving date/time
+			open write ../data/shipdata-current.tmp
+			write file {\m(GPSyear)-\m(GPSmonth)-\m(GPSday) \m(GPStime),\m(GPSlat),\m(GPSlng),\m(GPSdepth),\m(GPStempc),\m(GPSFixQuality),\m(GPSnSats),\m(GPSHDOP),\m(GPSAlt),\m(GPSTTMG),\m(GPSMTMG),\m(GPSSOGN),\m(GPSSOGK),\m(GPSMagVar)\%z\10}
+			close write
+			!mv ../data/shipdata-current.tmp ../data/shipdata-current.csv
+			!touch ../data/shipdata-current.flag
+
+			# save to mysql database
+			# now invoke mysql to import the data
+			! mysql -u shipuser -parrrrr -e "load data local infile '/opt/neeskay/data/shipdata-current.csv' ignore into table trackingdata_flex fields terminated by ',' (recdate,gpslat,gpslng,depthm,tempc,gpsfixquality,gpsnsats,gpshdop,gpsalt,gpsttmg,gpsmtmg,gpssogn,gpssogk,gpsmagvar\%x)" neeskay
+			! mysql -u shipuser -parrrrr -e "update trackingdata_flex set recdate=date_add(recdate, interval 1024 week) where recdate between '2001-11-23 00:00:00' and '2004-01-01 00:00:00'" neeskay
+			! mysql -u shipuser -parrrrr -e "flush tables" neeskay
+			! sync
+			! sync
+			! sync
+			write error "."
+			break
+
+
+		:GPGGA,	# $GPGGA - Global Positioning System Fix Data
+
+			assign GPSFixQuality \&g[6]  # Fix Quality 0=invalid, 1=GPS, 2=DGPS
+			assign GPSnSats      \&g[7]  # Number of satellites in view
+			assign GPSHDOP       \&g[8]  # Horizontal Dilution of Position
+			assign GPSAlt        \&g[9]  # altitude of antenna above sea level
+			break
+
+		:GPVTG,	# $GPVTG
+
+			assign GPSTTMG       \&g[1]  # True track made good
+			assign GPSMTMG       \&g[3]  # Magnetic track made good
+			assign GPSSOGN       \&g[5]  # Speed Over Ground in Nautical mph
+			assign GPSSOGK       \&g[7]  # Speed Over Ground in kilometeres per hour
+			break
+
+		:GPRMC,	# $GPRMC - recommended minimum specific GPS/Transit data
+
+			# most of this we already have from other sentences
+			assign GPSMagVar    \&g[10]  # Magnetic variation magnitude, degrees
+
+			# adjust sign: west means negative
+			if equal \&g[11] {W} {
+				(setq GPSMagVar (- GPSMagVar))
+			}
+			break
+	}
+
+}
+
+close
+exit
+
+:errmsg
+
+		# no input received within time allotted
+		# abort out of program, shell wrapper will restart
+		writeln error "no data received."
+		close conn
+		! echo "ERROR 200: As of `date '+%H:%M:%S':`" > error.flag
+		! echo " network OK, Furuno not online. --" >> error.flag
+		! echo It is either powered off or disconnected. >> error.flag
+		exit 1

@@ -1,0 +1,259 @@
+#!/home/neeskay/mambaforge3/bin/python3
+
+import os,sys,socket
+import math
+import datetime
+from pathlib import Path
+import pymysql
+import time
+
+
+import signal
+ 
+def handler(signum, frame):
+    print('*** INTERRUPT ***',file=sys.stderr,flush=True) 
+    sys.exit(1)
+ 
+signal.signal(signal.SIGINT, handler)
+signal.signal(signal.SIGQUIT, handler)
+
+
+def to_float(k):
+    try:
+        return float(k)
+    except Exception as e:
+        return None
+
+def to_int(k):
+    try:
+        return int(k)
+    except Exception as e:
+        return None
+
+#
+#  This is a Python (formerly Kermit) script that monitors the depth, temperature, and 
+#  GPS readings from the Furuno unit on the Neeskay and records this dataset
+#  to a CSV file and also saves it to a MySQL database.
+#
+
+
+# define function to convert latitude and longitude from
+# the NMEA format to decimal degrees
+
+def NMEAtoDecCoords(rawcoord,rawdir):
+	# (note that since N,S,E,W are all unique it is not necessary to
+	#  specify latitude vs longitude with this function.)
+
+    if rawcoord=='' or rawdir=='': return None
+
+    deccoord = math.floor(to_float(rawcoord)/100.0)
+    deccoord = deccoord + (to_float(rawcoord) - (deccoord * 100.0)) / 60.0
+    if rawdir == 'S' or rawdir == 'W':
+        deccoord = -deccoord
+
+    return deccoord
+
+"""
+	# fancy S-expressions are the easiest way to do math in Kermit
+	(setq deccoord (truncate (/ rawcoord 100)))
+	(setq deccoord (+ deccoord (/ (- rawcoord (* deccoord 100)) 60)))
+	if equal {\m(rawdir)} {S} {
+		(setq deccoord (- deccoord))
+	}
+	if equal {\m(rawdir)} {W} {
+		(setq deccoord (- deccoord))
+	}
+	}
+	}
+	return \m(deccoord)
+}
+"""
+
+GPSdepth       = "NULL"
+GPSlat         = "NULL"
+GPSlng         = "NULL"
+GPSdepth       = "NULL"
+GPStempc       = "NULL"
+GPSFixQuality  = "NULL"
+GPSnSats       = "NULL"
+GPSHDOP        = "NULL"
+GPSAlt         = "NULL"
+GPSTTMG        = "NULL"
+GPSMTMG        = "NULL"
+GPSSOGN        = "NULL"
+GPSSOGK        = "NULL"
+GPSMagVar      = "NULL"
+
+
+def nmea_generator(server_address):
+    try:
+        # make connection
+        host_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        host_sock.connect(server_address)
+    except Exception as e:
+        with open("error.flag","w") as f:
+            f.write(f'Exception: {e}:<br>Unable to connect to Furuno<br>Check MOXA on bridge.\n')
+        sys.exit(1)
+
+    with host_sock as s:
+        s.settimeout(10)
+        fil = s.makefile()
+        linein=""
+        while True:
+            try:
+                linein = fil.readline().strip()
+            except Exception as e:
+                print(f"in nmeaGenerator: {e}",file=sys.stderr,flush=True)
+                return
+            if (len(linein) > 6 and 
+                    linein[0] == '$' and 
+                    linein[-3] == '*'):
+
+                line = linein[:-3].split(',')
+                yield line
+
+# open the database
+with pymysql.connect(host="localhost", user="shipuser", password="arrrrr", db="neeskay") as db:
+    # initiate the nema generator 
+    nmeaGen = nmea_generator(('192.168.148.25',4001))
+    while True:
+        try:
+            line = next(nmeaGen)
+        except:
+            with open("error.flag","w") as f:
+                print("DATA ERROR: no data coming from Furuno.",file=f)
+                print("data stream stopped",file=sys.stderr,flush=True)
+            time.sleep(1)
+            print("trying...",file=sys.stderr,flush=True)
+            nmeaGen = nmea_generator(('192.168.148.25',4001))
+            continue
+        print(f"{line}",flush=True,file=sys.stderr)
+        open("error.flag","w").write("")
+        nmeaCode = line[0]
+
+        if nmeaCode == "":	# included for completeness- should never be reached
+            sys.stderr.write(f"no data received\n")
+        
+        if nmeaCode == "$GPDPT":  # $GPDPT - depth
+            GPSdepth = line[1]
+
+        if nmeaCode == "$GPGLL":  # $GPGLL - GPS location
+
+            rawlatn = line[1] # \fword(\%l,1,{,})
+            rawlatd = line[2] # \fword(\%l,2,{,})
+            rawlngn = line[3] # \fword(\%l,3,{,})
+            rawlngd = line[4] # \fword(\%l,4,{,})
+            rawutc  = line[5] # \fword(\%l,5,{,})
+
+            GPSlat = NMEAtoDecCoords (rawlatn,rawlatd)
+
+            GPSlng = NMEAtoDecCoords (rawlngn,rawlngd)
+
+        if nmeaCode == "$GPMTW":  # $GPMTW - water temperature
+
+            temp = to_float(line[1]) # \fword(\%l,1,{,})
+            unit = line[2] # \fword(\%l,2,{,})
+            # echo unit=\m(unit)
+            if unit[0] == "F":
+                GPStempc = (temp-32)*5/9
+            else:
+                GPStempc = temp
+
+        if nmeaCode == "$GPZDA":  # $GPZDA  Date & Time
+            #
+            #  SPECIAL NOTE ON THE $GPZDA RECORD:
+            #
+            #  This sentence is always the last sentence received from
+            #  the Furuno in each burst of sentences that is issued once a second.
+            #  Therefore, reception of this sentence is used to trigger the
+            #  output of the data record, which simply consists of the most recently
+            #  received values of all supported data.
+            #
+
+            # get data from YSI sonde
+            x = ""   # YSI fields
+            z = ""   # YSI data
+
+            # is there any YSI data?
+            if os.path.exists("../data/ysi-nmea.csv"):
+                # yes -- invoke ysi-nmea.php to generate list of fields and data
+                os.system("./ysi-nmea.php ../data/ysi.csv")
+                # now read them
+                with open("../data/ysi-nmea-data.csv","r") as f:
+                    x,z = f.readlines(2) 
+
+            UTC      = line[1] # \fword(\%l,1,{,})
+            GPShour  = to_int(UTC[0:2])
+            GPSmin   = to_int(UTC[2:4])
+            GPSsec   = to_int(UTC[4:6])
+            GPSday   = to_int(line[2]) # \fword(\%l,2,{,})
+            GPSmonth = to_int(line[3]) # \fword(\%l,3,{,})
+            GPSyear  = to_int(line[4]) # \fword(\%l,4,{,})
+
+            GPStime  = f"{GPShour:02d}:{GPSmin:02d}:{GPSsec:02d}"
+
+            pydt = datetime.datetime(GPSyear,GPSmonth,GPSday,GPShour,GPSmin,GPSsec)
+            unixtime = pydt.timestamp()
+            if GPSyear < 2009:
+                # add 1024weeks * 7 days/wk * 24 h/day * 60 min/h * 60 s/min
+                correctedtime = unixtime + 1024*7*24*60*60
+                cpydt = datetime.datetime.fromtimestamp(correctedtime)
+                GPSyear = cpydt.year
+                GPSmonth = cpydt.month
+                GPSday = cpydt.day
+
+            # write to file upon receiving date/time
+            with open("../data/shipdata.csv","a") as f:
+                f.write(f"{GPSyear:04d}-{GPSmonth:02d}-{GPSday:02d} {GPStime},{GPSlat},{GPSlng},{GPSdepth},{GPStempc},{GPSFixQuality},{GPSnSats},{GPSHDOP},{GPSAlt},{GPSTTMG},{GPSMTMG},{GPSSOGN},{GPSSOGK},{GPSMagVar}{z}\n")
+
+            # write to file upon receiving date/time
+            with open("../data/shipdata-current.tmp","w") as f:
+                f.write(f"{GPSyear}-{GPSmonth:02d}-{GPSday:02d} {GPStime},{GPSlat},{GPSlng},{GPSdepth},{GPStempc},{GPSFixQuality},{GPSnSats},{GPSHDOP},{GPSAlt},{GPSTTMG},{GPSMTMG},{GPSSOGN},{GPSSOGK},{GPSMagVar}{z}\n")
+            os.rename('../data/shipdata-current.tmp','../data/shipdata-current.csv')
+            Path('../data/shipdata-current.flag').touch()
+
+            # save to mysql database
+            # now invoke mysql to import the data
+
+            cursor = db.cursor()
+            
+            sql = f"""insert into trackingdata_flex (recdate,gpslat,gpslng,depthm,tempc,gpsfixquality,gpsnsats,gpshdop,gpsalt,gpsttmg,gpsmtmg,gpssogn,gpssogk,gpsmagvar{x})
+            values (
+            '{GPSyear}-{GPSmonth:02d}-{GPSday:02d} {GPStime}',{GPSlat},{GPSlng},{GPSdepth},{GPStempc},{GPSFixQuality},{GPSnSats},{GPSHDOP},{GPSAlt},{GPSTTMG},{GPSMTMG},{GPSSOGN},{GPSSOGK},{GPSMagVar}{z});"""
+
+            try:
+                # Execute the SQL command
+                cursor.execute(sql)
+                # Commit your changes in the database
+                print('commited to db',file=sys.stderr,flush=True)
+                db.commit()
+            except Exception as e:
+                # Rollback in case there is any error
+                db.rollback()
+                print(f'db ROLLBACK: {e}', file=sys.stderr,flush=True)
+
+        if nmeaCode == '$GPGGA': # $GPGGA - Global Positioning System Fix Data
+
+            GPSFixQuality = to_int(line[6])  # Fix Quality 0=invalid, 1=GPS, 2=DGPS
+            GPSnSats      = to_int(line[7])  # Number of satellites in view
+            GPSHDOP       = to_float(line[8])  # Horizontal Dilution of Position
+            GPSAlt        = to_float(line[9])  # altitude of antenna above sea level
+
+        if nmeaCode == '$GPVTG': # $GPVTG
+
+            GPSTTMG       = to_float(line[1])  # True track made good
+            GPSMTMG       = to_float(line[3])  # Magnetic track made good
+            GPSSOGN       = to_float(line[5])  # Speed Over Ground in Nautical mph
+            GPSSOGK       = to_float(line[7])  # Speed Over Ground in kilometeres per hour
+
+        if nmeaCode == '$GPRMC':  # $GPRMC - recommended minimum specific GPS/Transit data
+
+            # most of this we already have from other sentences
+            GPSMagVar    = to_float(line[10])  # Magnetic variation magnitude, degrees
+
+            # adjust sign: west means negative
+            if line[11] == 'W': 
+                GPSMagVar = -GPSMagVar
+
+
+
