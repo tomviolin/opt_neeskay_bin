@@ -17,7 +17,9 @@ s=None
 if len(sys.argv) > 1:
     sumfile = sys.argv[1]
 else:
-    sumfile="/opt/neeskay/data/compass.cur.csv"
+    sumfile="/opt/neeskay/data/windraw.cur.csv"
+
+gpsfile = "../data/shipdata-current.csv"
 
 print("sumfile=",sumfile)
 
@@ -28,20 +30,22 @@ def main():
     recount = -1
     dateime = None
 
-    s.connect(('192.168.148.56',4001))
+    s.connect(('192.168.148.56',4002))
     f=s.makefile("r")
 
     recount = -1
     totaln = 0
     totale = 0
-    totalws = 0
-    maxws = 0
+    totalspd = 0
+    maxspd = 0
     thistime = datetime.datetime.utcnow()
     print(thistime)
     lasttime = thistime
     while True:
+        print("reading...",flush=True)
         datalin =  f.readline().strip()
-        if datalin[0] != '$' or datalin[-3] != '*': continue
+        print(datalin,flush=True)
+        if datalin[0] != '$' or datalin[-3:] != 'N,A': continue
         dataline = datalin.split(",")
         thistime = datetime.datetime.utcnow()
         print(thistime)
@@ -51,10 +55,13 @@ def main():
             lasttime = thistime
             # if we have data, write them
             if recount > 0:
+                gpsdata = open(gpsfile,"r").readline().split(",")
+                print(f"Tgpsdata[9])
                 with open(sumfile+".tmp","w") as sumf:
                     avgwd = math.atan2(totale/recount,totaln/recount)/math.pi*180.
                     if (avgwd < 0): avgwd += 360
-                    sumrec = [ thistime.strftime("%Y-%m-%d %H:%M:%S"), str(recount), str(avgwd) ]
+                    avgspd = math.sqrt(totale*totale+totaln*totaln)/recount
+                    sumrec = [ thistime.strftime("%Y-%m-%d %H:%M:%S"), str(recount), str(avgwd), str(avgspd) ]
                     print(sumrec)
                     print(",".join(sumrec), file=sumf)
                 with open(sumfile+".log","a") as sumlog:
@@ -66,8 +73,8 @@ def main():
                 cursor = db.cursor()
 
                 # Prepare SQL query to INSERT a record into the database.
-                sql = f"INSERT INTO compass (recdate, nrecs, avg_degrees) \
-                   VALUES ('{sumrec[0]}',{recount},{avgwd});"
+                sql = f"INSERT INTO windraw (recdate, nrecs, avg_degrees) \
+                   VALUES ('{sumrec[0]}',{recount},{avgwd},{avgspd});"
                 print (sql)
                 try:
                    # Execute the SQL command
@@ -83,21 +90,21 @@ def main():
             recount = 0
             totaln = 0
             totale = 0
-            totalws = 0
-            maxws = 0
+            totalspd = 0
+            maxspd = 0
         elif recount == -1:
             pass
-        elif dataline[0] == "$GPHDT":
+        elif dataline[0] == "$WIMWV":
             dataout = [ thistime.strftime("%Y-%m-%d %H:%M:%S") ] + dataline[1:]
             #print(dataout)
-            thisws = 1
             thisdir = float(dataline[1])
-            thisn = math.cos(thisdir*math.pi/180.)*thisws
-            thise = math.sin(thisdir*math.pi/180.)*thisws
+            thisspd = float(dataline[3])
+            thisn = math.cos(thisdir*math.pi/180.)*thisspd
+            thise = math.sin(thisdir*math.pi/180.)*thisspd
             totaln += thisn
             totale += thise
-            if (thisws > maxws): maxws = thisws
-            totalws += thisws
+            if (thisspd > maxspd): maxspd = thisspd
+            totalspd += thisspd
             recount = recount + 1
                 
 
