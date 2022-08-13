@@ -56,10 +56,10 @@ def main():
             # if we have data, write them
             if recount > 0:
                 gpsdata = open(gpsfile,"r").readline().split(",")
-                print(f"Tgpsdata[9])
                 with open(sumfile+".tmp","w") as sumf:
                     avgwd = math.atan2(totale/recount,totaln/recount)/math.pi*180.
                     if (avgwd < 0): avgwd += 360
+                    if (avgwd >= 360): avgwd -= 360
                     avgspd = math.sqrt(totale*totale+totaln*totaln)/recount
                     sumrec = [ thistime.strftime("%Y-%m-%d %H:%M:%S"), str(recount), str(avgwd), str(avgspd) ]
                     print(sumrec)
