@@ -1,21 +1,21 @@
 #!/bin/bash
 
 cd /opt/neeskay/bin
-echo "0=$0"
+#echo "0=$0"
 # establish bash name of daemon from command name
 #   (command name = (basename)ctl.sh)
 daemonbase=`basename "$0" ctl.sh`
-echo "daemonbase=$daemonbase"
+#echo "daemonbase=$daemonbase"
 # establish search string for pgrep
 #   first character is surrounded by brackets to
 #   keep the pgrep command from matching itself
 daemonsearch="[${daemonbase:0:1}]${daemonbase:1}"
-echo "daemonsearch=$daemonsearch"
+#echo "daemonsearch=$daemonsearch"
 # determine status before going in
 me=$$
-echo ">>" "pgrep $daemonsearch | grep -v ctl\\\.sh"
+#echo ">>" "pgrep $daemonsearch | grep -v ctl\\\.sh"
 daemonprocs=`ps -ef | grep "$daemonsearch" | grep -v ctl.sh | awk '{ print $2 }'`
-echo "daemonprocs=$daemonprocs"
+#echo "daemonprocs=$daemonprocs"
 if [ "x$daemonprocs" == "x" ]; then
 	dstat=stopped
 else

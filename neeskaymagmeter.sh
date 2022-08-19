@@ -1,6 +1,7 @@
 #!/bin/bash
-PIDFILE=/var/run/neeskaymagmeter.pid
+PIDFILE=/tmp/run/neeskaymagmeter.pid
+mkdir -p /tmp/run
 echo $$ > $PIDFILE
 cd /opt/neeskay/bin
-python3 compass.py
+python3 neeskaymagmeter.py
 
