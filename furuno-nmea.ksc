@@ -23,7 +23,17 @@ set input echo off
 
 # connect to Moxa in TCP server mode
 set telnet wait off
-set host /nowait 192.168.148.25 4001
+
+# USB port
+set port /dev/ttyUSB0
+set speed 4800
+set carr n
+set flow n
+
+
+
+# internet host
+#set host /nowait 192.168.148.25 4001
 
 # connect to Moxa in Real COM mode
 #set port /dev/ttyr02

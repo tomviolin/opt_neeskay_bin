@@ -33,7 +33,7 @@ case "$1" in
 			echo $daemonbase is already $dstat.
 		else
 			echo starting ${daemonbase}.sh...
-			/usr/bin/nohup ./${daemonbase}.sh > /dev/null 2>&1 &
+			/usr/bin/nohup ./${daemonbase}.sh >> /tmp/magmeter.log 2>&1 &
 			sleep 1
 			$0 status
 		fi

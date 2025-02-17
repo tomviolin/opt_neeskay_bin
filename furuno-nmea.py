@@ -1,4 +1,5 @@
 #!/home/neeskay/mambaforge3/bin/python3
+# vim:expandtab:ts=4:sw=4:softtabstop=4:
 
 import os,sys,socket
 import math
@@ -6,10 +7,16 @@ import datetime
 from pathlib import Path
 import pymysql
 import time
-
+import serial
 
 import signal
- 
+import tzlocal, pytz
+from multiprocessing import Queue, Process
+
+DBQ = Queue()
+
+
+
 def handler(signum, frame):
     print('*** INTERRUPT ***',file=sys.stderr,flush=True) 
     sys.exit(1)
@@ -41,8 +48,8 @@ def to_int(k):
 # the NMEA format to decimal degrees
 
 def NMEAtoDecCoords(rawcoord,rawdir):
-	# (note that since N,S,E,W are all unique it is not necessary to
-	#  specify latitude vs longitude with this function.)
+        # (note that since N,S,E,W are all unique it is not necessary to
+        #  specify latitude vs longitude with this function.)
 
     if rawcoord=='' or rawdir=='': return None
 
@@ -54,18 +61,18 @@ def NMEAtoDecCoords(rawcoord,rawdir):
     return deccoord
 
 """
-	# fancy S-expressions are the easiest way to do math in Kermit
-	(setq deccoord (truncate (/ rawcoord 100)))
-	(setq deccoord (+ deccoord (/ (- rawcoord (* deccoord 100)) 60)))
-	if equal {\m(rawdir)} {S} {
-		(setq deccoord (- deccoord))
-	}
-	if equal {\m(rawdir)} {W} {
-		(setq deccoord (- deccoord))
-	}
-	}
-	}
-	return \m(deccoord)
+        # fancy S-expressions are the easiest way to do math in Kermit
+        (setq deccoord (truncate (/ rawcoord 100)))
+        (setq deccoord (+ deccoord (/ (- rawcoord (* deccoord 100)) 60)))
+        if equal {\m(rawdir)} {S} {
+            (setq deccoord (- deccoord))
+        }
+        if equal {\m(rawdir)} {W} {
+            (setq deccoord (- deccoord))
+        }
+        }
+        }
+        return \m(deccoord)
 }
 """
 print(f"==== furuno-nmea START: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ====",file=sys.stderr,flush=True)
@@ -88,7 +95,7 @@ GPSSOGK        = "NULL"
 GPSMagVar      = "NULL"
 
 
-def nmea_generator(server_address):
+def nmea_generator_inet(server_address):
     try:
         # make connection
         host_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -115,29 +122,96 @@ def nmea_generator(server_address):
                 line = linein[:-3].split(',')
                 yield line
 
-# open the database
-with pymysql.connect(host="localhost", user="shipuser", password="arrrrr", db="neeskay") as db:
+def nmea_generator(nmea_port):
+    try:
+        # make connection
+        ser = serial.Serial('/dev/ttyUSB0',38400,parity=serial.PARITY_NONE)
+    except Exception as e:
+        with open("error.flag","w") as f:
+            f.write(f'Exception: {e}:<br>Unable to connect to USB Serial Port<br>Check USB cable plugged into "SHIP DATA SYSTEM"\n')
+        sys.exit(1)
+
+    with ser as s:
+        fil = ser
+        linein=""
+        while True:
+            try:
+                linein = fil.readline().decode('UTF-8').strip()
+            except Exception as e:
+                print(f"in nmeaGenerator: {e}",file=sys.stderr,flush=True)
+                return
+            if (len(linein) > 6 and 
+                    linein[0] == '$' and 
+                    linein[-3] == '*'):
+
+                line = linein[:-3].split(',')
+                yield line
+
+
+def save_to_database_helper(db, sql):
+    # save to mysql database
+    # now invoke mysql to import the data
+    print("helper.")
+    cursor = db.cursor()
+    
+    try:
+        # Execute the SQL command
+        cursor.execute(sql)
+        # Commit your changes in the database
+        #print('commited to db',file=sys.stderr,flush=True)
+        db.commit()
+    except Exception as e:
+        # Rollback in case there is any error
+        db.rollback()
+        print(f'db ROLLBACK: {e}', file=sys.stderr,flush=True)
+
+def DatabaseThread():
+    print('opening the database.',file=sys.stderr, flush=True)
+    with pymysql.connect(host="localhost", user="shipuser", password="arrrrr", db="neeskay", cursorclass=pymysql.cursors.DictCursor) as db:
+        while True:
+            sql = DBQ.get()
+            print("dbthread recvd req.")
+            if sql is None:
+                break
+            save_to_database_helper(db,sql)
+                        
+def save_to_database(sql):
+    DBQ.put(sql)
+
+#  start db thread
+print("db process starting")
+database_proc = Process(target=DatabaseThread)
+database_proc.start()
+print(f"started {database_proc}")
+
+    
+if True:
+    #print('database open!',file=sys.stderr,flush=True)
     # initiate the nema generator 
-    nmeaGen = nmea_generator(('192.168.148.25',4001))
+    # nmeaGen = nmea_generator(('192.168.148.25',4001))
+    nmeaGen = nmea_generator(('/dev/ttyUSB0',4800))
+    #print("nmea_generator created!",file=sys.stderr,flush=True)
     while True:
+        #print("going to try.",file=sys.stderr,flush=True)
         try:
             line = next(nmeaGen)
-        except:
+        except Exception as e:
             with open("error.flag","w") as f:
-                print("DATA ERROR: no data coming from Furuno.",file=f)
-                print("data stream stopped",file=sys.stderr,flush=True)
+                print(f"DATA ERROR: no data coming from Furuno: {e}",file=f)
+                print(f"data stream stopped: {e}",file=sys.stderr,flush=True)
             time.sleep(1)
-            print("trying...",file=sys.stderr,flush=True)
-            nmeaGen = nmea_generator(('192.168.148.25',4001))
+            #print("trying...",file=sys.stderr,flush=True)
+            #nmeaGen = nmea_generator() #('192.168.148.25',4001))
+            nmeaGen = nmea_generator(('/dev/ttyUSB0',38400))
             continue
         print(f"{line}",flush=True,file=sys.stderr)
         open("error.flag","w").write("")
         nmeaCode = line[0]
 
-        if nmeaCode == "":	# included for completeness- should never be reached
+        if nmeaCode == "":    # included for completeness- should never be reached
             sys.stderr.write(f"no data received\n")
-        
-        if nmeaCode == "$GPDPT":  # $GPDPT - depth
+
+        if nmeaCode[3:] == "DPT":  # $GPDPT - depth
             GPSdepth = line[1]
 
         if nmeaCode == "$GPGLL":  # $GPGLL - GPS location
@@ -152,7 +226,7 @@ with pymysql.connect(host="localhost", user="shipuser", password="arrrrr", db="n
 
             GPSlng = NMEAtoDecCoords (rawlngn,rawlngd)
 
-        if nmeaCode == "$GPMTW":  # $GPMTW - water temperature
+        if nmeaCode[3:] == "MTW":  # $GPMTW - water temperature
 
             temp = to_float(line[1]) # \fword(\%l,1,{,})
             unit = line[2] # \fword(\%l,2,{,})
@@ -194,8 +268,12 @@ with pymysql.connect(host="localhost", user="shipuser", password="arrrrr", db="n
             GPSyear  = to_int(line[4]) # \fword(\%l,4,{,})
 
             GPStime  = f"{GPShour:02d}:{GPSmin:02d}:{GPSsec:02d}"
+            #print(f"** Uncorrected GPStime: {GPSyear:04d}-{GPSmonth:02d}-{GPSday:02d} {GPStime}",flush=True)
 
-            pydt = datetime.datetime(GPSyear,GPSmonth,GPSday,GPShour,GPSmin,GPSsec)
+            # GPStime  = f"{GPShour:02d}:{GPSmin:02d}:{GPSsec:02d}"
+            # print(f"GPStime: {GPStime}",flush=True)
+
+            pydt = datetime.datetime(GPSyear,GPSmonth,GPSday,GPShour,GPSmin,GPSsec, tzinfo=pytz.UTC)
             unixtime = pydt.timestamp()
             if GPSyear < 2009:
                 # add 1024weeks * 7 days/wk * 24 h/day * 60 min/h * 60 s/min
@@ -204,6 +282,14 @@ with pymysql.connect(host="localhost", user="shipuser", password="arrrrr", db="n
                 GPSyear = cpydt.year
                 GPSmonth = cpydt.month
                 GPSday = cpydt.day
+
+            GPStime  = f"{GPShour:02d}:{GPSmin:02d}:{GPSsec:02d}"
+            #print(f"**   CORRECTED GPStime: {GPSyear:04d}-{GPSmonth:02d}-{GPSday:02d} {GPStime}",flush=True)
+
+            # correct to local time 
+            localdt = cpydt.astimezone(tzlocal.get_localzone())
+
+            #print(f"**   LOCALIZED GPStime: {localdt.year:04d}-{localdt.month:02d}-{localdt.day:02d} {localdt.hour:02d}:{localdt.minute:02d}:{localdt.second:02d}",flush=True)
 
             # write to file upon receiving date/time
             with open("../data/shipdata.csv","a") as f:
@@ -218,22 +304,18 @@ with pymysql.connect(host="localhost", user="shipuser", password="arrrrr", db="n
             # save to mysql database
             # now invoke mysql to import the data
 
-            cursor = db.cursor()
-            
-            sql = f"""insert into trackingdata_flex (recdate,gpslat,gpslng,depthm,tempc,gpsfixquality,gpsnsats,gpshdop,gpsalt,gpsttmg,gpsmtmg,gpssogn,gpssogk,gpsmagvar{x})
-            values (
-            '{GPSyear}-{GPSmonth:02d}-{GPSday:02d} {GPStime}',{GPSlat},{GPSlng},{GPSdepth},{GPStempc},{GPSFixQuality},{GPSnSats},{GPSHDOP},{GPSAlt},{GPSTTMG},{GPSMTMG},{GPSSOGN},{GPSSOGK},{GPSMagVar}{z});"""
 
-            try:
-                # Execute the SQL command
-                cursor.execute(sql)
-                # Commit your changes in the database
-                print('commited to db',file=sys.stderr,flush=True)
-                db.commit()
-            except Exception as e:
-                # Rollback in case there is any error
-                db.rollback()
-                print(f'db ROLLBACK: {e}', file=sys.stderr,flush=True)
+            sql = f"""
+        INSERT INTO trackingdata_flex (
+        	recdate,
+    	gpslat,gpslng,depthm,tempc,gpsfixquality,gpsnsats,gpshdop,gpsalt,
+    	gpsttmg,gpsmtmg,gpssogn,gpssogk,gpsmagvar{x})
+            VALUES (
+                '{GPSyear}-{GPSmonth:02d}-{GPSday:02d} {GPStime}',
+    	{GPSlat},{GPSlng},{GPSdepth},{GPStempc},{GPSFixQuality},{GPSnSats},{GPSHDOP},{GPSAlt},
+    	{GPSTTMG},{GPSMTMG},{GPSSOGN},{GPSSOGK},{GPSMagVar}{z});"""
+
+            save_to_database(sql)
 
         if nmeaCode == '$GPGGA': # $GPGGA - Global Positioning System Fix Data
 
@@ -250,7 +332,8 @@ with pymysql.connect(host="localhost", user="shipuser", password="arrrrr", db="n
             GPSSOGK       = to_float(line[7])  # Speed Over Ground in kilometeres per hour
 
         if nmeaCode == '$GPRMC':  # $GPRMC - recommended minimum specific GPS/Transit data
-
+            # Sample data record:
+            # ['$GPRMC', '193042.60', 'A', '4301.071', 'N', '08754.220', 'W', '0.0', '92.8', '040705', '3.0', 'W']
             # most of this we already have from other sentences
             GPSMagVar    = to_float(line[10])  # Magnetic variation magnitude, degrees
 
@@ -258,5 +341,18 @@ with pymysql.connect(host="localhost", user="shipuser", password="arrrrr", db="n
             if line[11] == 'W': 
                 GPSMagVar = -GPSMagVar
 
+            GPSlat = NMEAtoDecCoords (line[3],line[4])
+            GPSlng = NMEAtoDecCoords (line[5],line[6])
+            GPSSOGN       = to_float(line[7])  # Speed Over Ground in Nautical mph
+            GPSTTMG       = to_float(line[8])  # True track made good
 
+            UTC      = line[1] # \fword(\%l,1,{,})
+            GPShour  = to_int(UTC[0:2])
+            GPSmin   = to_int(UTC[2:4])
+            GPSsec   = to_int(UTC[4:6])
+            GPSmsec  = to_int(UTC[7:9]+'0')
+            GPSday   = to_int(line[2]) # \fword(\%l,2,{,})
+            GPSmonth = to_int(line[3]) # \fword(\%l,3,{,})
+            GPSyear  = to_int(line[4]) # \fword(\%l,4,{,})
 
+    # end while True

@@ -39,9 +39,11 @@ def main():
                     if datalin[0] != '$' or datalin[-3] != '*': continue
                     dataline = datalin.split(",")
                     thistime = datetime.datetime.utcnow()
-                    print(thistime)
+                    print(f"thistime={thistime}")
                     print(dataline)
+                    print(f"??? {thistime.second} != {lasttime.second}")
                     if thistime.second != lasttime.second:
+                        os.system("/usr/bin/touch /tmp/magmeterran.flag")
                         # ==== ONLY RUN FOLLOWING CODE ONCE PER SECOND ====
                         # if we have data, write them
                         if recount > 0:
