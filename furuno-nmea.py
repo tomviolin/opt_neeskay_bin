@@ -12,17 +12,25 @@ import serial
 import signal
 import tzlocal, pytz
 from multiprocessing import Queue, Process
-
+db=None
 DBQ = Queue()
 
-
+database_proc = None
 
 def handler(signum, frame):
     print('*** INTERRUPT ***',file=sys.stderr,flush=True) 
+    DBQ.put(None)
+    print('*** waiting for db proc ***',file=sys.stderr,flush=True) 
+    database_proc.join()
+    print('*** done waiting! ***',file=sys.stderr,flush=True) 
     sys.exit(1)
  
-signal.signal(signal.SIGINT, handler)
-signal.signal(signal.SIGQUIT, handler)
+def dbhandler(signum, frame):
+    print('*** DB INTERRUPT ***',file=sys.stderr,flush=True) 
+    if db is not None:
+        db.close()
+    sys.exit(1)
+ 
 
 
 def to_float(k):
@@ -113,7 +121,7 @@ def nmea_generator_inet(server_address):
             try:
                 linein = fil.readline().strip()
             except Exception as e:
-                print(f"in nmeaGenerator: {e}",file=sys.stderr,flush=True)
+                #print(f"in nmeaGenerator: {e}",file=sys.stderr,flush=True)
                 return
             if (len(linein) > 6 and 
                     linein[0] == '$' and 
@@ -151,7 +159,7 @@ def nmea_generator(nmea_port):
 def save_to_database_helper(db, sql):
     # save to mysql database
     # now invoke mysql to import the data
-    print("helper.")
+    #print("helper.")
     cursor = db.cursor()
     
     try:
@@ -166,12 +174,15 @@ def save_to_database_helper(db, sql):
         print(f'db ROLLBACK: {e}', file=sys.stderr,flush=True)
 
 def DatabaseThread():
-    print('opening the database.',file=sys.stderr, flush=True)
+    signal.signal(signal.SIGINT, dbhandler)
+    signal.signal(signal.SIGQUIT, dbhandler)
+    #print('opening the database.',file=sys.stderr, flush=True)
     with pymysql.connect(host="localhost", user="shipuser", password="arrrrr", db="neeskay", cursorclass=pymysql.cursors.DictCursor) as db:
         while True:
             sql = DBQ.get()
-            print("dbthread recvd req.")
+            #print("dbthread recvd req.")
             if sql is None:
+                print("*** DB PROC EXIT ***",file=sys.stderr,flush=True)
                 break
             save_to_database_helper(db,sql)
                         
@@ -179,11 +190,13 @@ def save_to_database(sql):
     DBQ.put(sql)
 
 #  start db thread
-print("db process starting")
+#print("db process starting")
 database_proc = Process(target=DatabaseThread)
 database_proc.start()
-print(f"started {database_proc}")
+#print(f"started {database_proc}")
 
+signal.signal(signal.SIGINT, handler)
+signal.signal(signal.SIGQUIT, handler)
     
 if True:
     #print('database open!',file=sys.stderr,flush=True)
@@ -204,7 +217,7 @@ if True:
             #nmeaGen = nmea_generator() #('192.168.148.25',4001))
             nmeaGen = nmea_generator(('/dev/ttyUSB0',38400))
             continue
-        print(f"{line}",flush=True,file=sys.stderr)
+        print(f"{line}",flush=True,file=sys.stdout)
         open("error.flag","w").write("")
         nmeaCode = line[0]
 
@@ -268,29 +281,34 @@ if True:
             GPSyear  = to_int(line[4]) # \fword(\%l,4,{,})
 
             GPStime  = f"{GPShour:02d}:{GPSmin:02d}:{GPSsec:02d}"
-            #print(f"** Uncorrected GPStime: {GPSyear:04d}-{GPSmonth:02d}-{GPSday:02d} {GPStime}",flush=True)
+            print(f"** Uncorrected GPStime: {GPSyear:04d}-{GPSmonth:02d}-{GPSday:02d} {GPStime}",flush=True)
 
-            # GPStime  = f"{GPShour:02d}:{GPSmin:02d}:{GPSsec:02d}"
-            # print(f"GPStime: {GPStime}",flush=True)
+            GPStime  = f"{GPShour:02d}:{GPSmin:02d}:{GPSsec:02d}"
+            print(f"GPStime: {GPStime}",flush=True)
 
-            pydt = datetime.datetime(GPSyear,GPSmonth,GPSday,GPShour,GPSmin,GPSsec, tzinfo=pytz.UTC)
+            pydt = datetime.datetime(GPSyear,GPSmonth,GPSday,GPShour,GPSmin,GPSsec) #, tzinfo=pytz.UTC)
             unixtime = pydt.timestamp()
             if GPSyear < 2009:
                 # add 1024weeks * 7 days/wk * 24 h/day * 60 min/h * 60 s/min
                 correctedtime = unixtime + 1024*7*24*60*60
-                cpydt = datetime.datetime.fromtimestamp(correctedtime)
-                GPSyear = cpydt.year
-                GPSmonth = cpydt.month
-                GPSday = cpydt.day
+            else:
+                correctedtime = unixtime
+            cpydt = datetime.datetime.fromtimestamp(correctedtime)
+            utczone = pytz.timezone('UTC')
+            cpydt = utczone.localize(cpydt)
+            print(f"CORRECTED TZINFO: {cpydt.tzinfo}")
+            GPSyear = cpydt.year
+            GPSmonth = cpydt.month
+            GPSday = cpydt.day
 
-            GPStime  = f"{GPShour:02d}:{GPSmin:02d}:{GPSsec:02d}"
-            #print(f"**   CORRECTED GPStime: {GPSyear:04d}-{GPSmonth:02d}-{GPSday:02d} {GPStime}",flush=True)
+            GPStime  = f"{cpydt.hour:02d}:{cpydt.minute:02d}:{cpydt.second:02d}"
+            print(f"**   CORRECTED GPStime: {GPSyear:04d}-{GPSmonth:02d}-{GPSday:02d} {GPStime}",flush=True)
 
             # correct to local time 
-            localdt = cpydt.astimezone(tzlocal.get_localzone())
+            #localdt = cpydt.astimezone(tzlocal.get_localzone())
 
             #print(f"**   LOCALIZED GPStime: {localdt.year:04d}-{localdt.month:02d}-{localdt.day:02d} {localdt.hour:02d}:{localdt.minute:02d}:{localdt.second:02d}",flush=True)
-
+            """
             # write to file upon receiving date/time
             with open("../data/shipdata.csv","a") as f:
                 f.write(f"{GPSyear:04d}-{GPSmonth:02d}-{GPSday:02d} {GPStime},{GPSlat},{GPSlng},{GPSdepth},{GPStempc},{GPSFixQuality},{GPSnSats},{GPSHDOP},{GPSAlt},{GPSTTMG},{GPSMTMG},{GPSSOGN},{GPSSOGK},{GPSMagVar}{z}\n")
@@ -300,7 +318,7 @@ if True:
                 f.write(f"{GPSyear}-{GPSmonth:02d}-{GPSday:02d} {GPStime},{GPSlat},{GPSlng},{GPSdepth},{GPStempc},{GPSFixQuality},{GPSnSats},{GPSHDOP},{GPSAlt},{GPSTTMG},{GPSMTMG},{GPSSOGN},{GPSSOGK},{GPSMagVar}{z}\n")
             os.rename('../data/shipdata-current.tmp','../data/shipdata-current.csv')
             Path('../data/shipdata-current.flag').touch()
-
+            """
             # save to mysql database
             # now invoke mysql to import the data
 

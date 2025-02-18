@@ -9,7 +9,7 @@ while True:
 	elapsed = now-last
 	linetime = now - lastline
 	lastline=now
-	if line[2:8]=='$GPZDA': last=now
+	if line[2:8]=='$GPRMC': last=now
 	nmeaid = json.loads(line)[0]
 	print (f"{elapsed // 1000000000:02d}.{elapsed%1000000000:09d},{linetime//1000000000:02d}.{linetime%1000000000:09d},\"{nmeaid[1:]}\"",flush=True)
 
