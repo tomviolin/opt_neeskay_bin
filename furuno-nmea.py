@@ -1,4 +1,4 @@
-#!/home/neeskay/mambaforge3/bin/python3
+#!/home/neeskay/venv/bin/python3
 # vim:expandtab:ts=4:sw=4:softtabstop=4:
 
 import os,sys,socket
@@ -72,15 +72,15 @@ def NMEAtoDecCoords(rawcoord,rawdir):
         # fancy S-expressions are the easiest way to do math in Kermit
         (setq deccoord (truncate (/ rawcoord 100)))
         (setq deccoord (+ deccoord (/ (- rawcoord (* deccoord 100)) 60)))
-        if equal {\m(rawdir)} {S} {
+        if equal {\\m(rawdir)} {S} {
             (setq deccoord (- deccoord))
         }
-        if equal {\m(rawdir)} {W} {
+        if equal {\\m(rawdir)} {W} {
             (setq deccoord (- deccoord))
         }
         }
         }
-        return \m(deccoord)
+        return \\m(deccoord)
 }
 """
 print(f"==== furuno-nmea START: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ====",file=sys.stderr,flush=True)

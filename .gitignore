@@ -6,3 +6,5 @@ tmpjunk
 tmpjunk/
 tmpjunk/*
 *.dat
+*.flag
+./error.flag
